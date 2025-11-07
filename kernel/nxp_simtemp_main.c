@@ -70,55 +70,60 @@ static enum hrtimer_restart simtemp_timer( struct hrtimer* ptrTimer )
     /* Getting the struct address for full access to its members */
     struct SimSensor_t* sensor = container_of(ptrTimer, struct SimSensor_t, _timer);
     struct simtemp_sample newSample;
-    unsigned long flags = 0;
+    unsigned long irqFlags;
+    __u32 sampleFlags = 0;
 
     /* Update sensor field with lock to protect shared resources */
-    spin_lock_irqsave(&sensor->_spinLock, flags);
+    spin_lock_irqsave(&sensor->_spinLock, irqFlags);
     sensor->_temperatureValue = simtemp_gen_values(sensor);
-    sensor->stats._allSamples++;
-    spin_unlock_irqrestore(&sensor->_spinLock, flags);
+    //sensor->stats._allSamples++;
+    spin_unlock_irqrestore(&sensor->_spinLock, irqFlags);
 
     newSample.timestamp_ns = ktime_get_real_ns();
     newSample.temp_mC = sensor->_temperatureValue;
+    newSample.flags = 0;
 
     /* Determine threshold crossing */
     if (newSample.temp_mC >= sensor->threshold_mC)
     {
-        flags |= THRESHOLD_TEMP_CROSSED;
+        /* Enabling threshold crossed flag: 10 */
+        sampleFlags |= THRESHOLD_TEMP_CROSSED;
     }
     else
     {
-        flags |= THRESHOLD_TEMP_AWAY;
+        /* Threshold flag remains disabled: 00 */
+        sampleFlags |= THRESHOLD_TEMP_AWAY;
     }
 
-    flags |= NEW_TEMP_SAMPLE;
-    newSample.flags = flags;
+    /* Enabling new sample flag: 01 or 11 */
+    sampleFlags |= NEW_TEMP_SAMPLE;
+    newSample.flags = sampleFlags;
 
     pr_info("sample ts=%llu temp=%d flags=0x%x\n", newSample.timestamp_ns, newSample.temp_mC, newSample.flags);
 
-    /* Writing sensor data to buffer */
-    spin_lock_irqsave(&sensor->_spinLock, flags);
+    /* Lock for sensor data writing */
+    spin_lock_irqsave(&sensor->_spinLock, irqFlags);
+
+    /* Enqueue sample; check return for overflow */
+    if ( rbuffer_enqueue(&sensor->tempBuffer, &newSample))
+    {
+        //sensor->stats._overflow++;
+        pr_warn("%s: ring buffer is full\n", DRIVER_KERNEL_ID);
+    }
+    else
+    {
+        sensor->stats._allSamples++;
+    }
 
     /* Update alert state: changes with threshold crossing */
     if ( (newSample.flags & THRESHOLD_TEMP_CROSSED) && (sensor->_alertState == ALERT_TEMP_DISABLED) )
     {
-        sensor->_thresholdCrossed = THRESHOLD_TEMP_CROSSED;
         sensor->stats._allAlerts++;
         sensor->_alertState = ALERT_TEMP_ENABLED;
         pr_info_ratelimited("%s: SENT ALERT ---> temperature = %d mC\n", DRIVER_KERNEL_ID, newSample.temp_mC);
     }
 
-    /* Enqueue sample; check return for overflow */
-    if ( rbuffer_enqueue(&sensor->tempBuffer, &newSample))
-    {
-        /* handle overflow; decide whether to drop oldest or this sample */
-        //sensor->stats._overflow++;
-        pr_warn("%s: ring buffer overflow\n", DRIVER_KERNEL_ID);
-    }
-
-    sensor->stats._allSamples++;
-
-    spin_unlock_irqrestore(&sensor->_spinLock, flags);
+    spin_unlock_irqrestore(&sensor->_spinLock, irqFlags);
 
     /* New sensor data wake up */
     wake_up_interruptible(&sensor->waitQueue);
@@ -168,18 +173,18 @@ static ssize_t simtemp_read( struct file* kernelFile, char __user *usrBuffer, si
 
     struct SimSensor_t* sensor = kernelFile->private_data;
     struct simtemp_sample sampleToRead;
-    unsigned long flags;
+    unsigned long irqflags;
 
     if ( usrRequestedBytes < sizeof(sampleToRead))
     {
         return -EINVAL;
     }
 
-    spin_lock_irqsave(&sensor->_spinLock, flags);
+    spin_lock_irqsave(&sensor->_spinLock, irqflags);
 
     if ( rbuffer_empty(&sensor->tempBuffer) )
     {
-        spin_unlock_irqrestore(&sensor->_spinLock, flags);
+        spin_unlock_irqrestore(&sensor->_spinLock, irqflags);
 
         /* Check for file access block. If there's no new sensor data O_NONBLOCK is set */
         if ( kernelFile->f_flags & O_NONBLOCK )
@@ -195,13 +200,13 @@ static ssize_t simtemp_read( struct file* kernelFile, char __user *usrBuffer, si
             return -ERESTARTSYS;
         }
 
-        spin_lock_irqsave(&sensor->_spinLock, flags);
+        spin_lock_irqsave(&sensor->_spinLock, irqflags);
     }
 
     /* User gets sensor data */
     rbuffer_dequeue(&sensor->tempBuffer, &sampleToRead);
 
-    spin_unlock_irqrestore(&sensor->_spinLock, flags);
+    spin_unlock_irqrestore(&sensor->_spinLock, irqflags);
 
     /* Passing device data at kernel to user variable */
     if ( copy_to_user(usrBuffer, &sampleToRead, sizeof(sampleToRead)) )
@@ -315,7 +320,6 @@ static int simtemp_probe( struct platform_device* platformDevice )
     sensor->_temperatureValue = AMBIENT_TEMP_INIT_MC;
     sensor->threshold_mC = THRESHOLD_TEMP_INIT_MC;
     sensor->_alertState = ALERT_TEMP_DISABLED;
-    sensor->_thresholdCrossed = THRESHOLD_TEMP_AWAY;
     sensor->_period = ktime_set(0, sensor->sampling_ms*1000000ULL);  // 1000000 ns = 1 ms
 
     /* Register the miscdevice after values configured */
