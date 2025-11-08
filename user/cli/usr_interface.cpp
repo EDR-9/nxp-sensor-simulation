@@ -65,7 +65,7 @@ void device_polling(  )
 
     struct pollfd fileIdPoll = {fileId, POLLIN, 0};
 
-    std::cout << "Polling " << device << " for sensor data..." << std::endl;
+    std::cout << "Polling " << device << " for sensor data...\n" << std::endl;
 
     while ( true )
     {
@@ -79,7 +79,7 @@ void device_polling(  )
         
         else if ( pollEvents == 0 )
         {
-            std::cout << "\nWaiting for device..." << std::flush; // keep alive indicator
+            std::cout << "" << std::flush; // keep alive indicator
             continue;
         }
 
@@ -92,12 +92,11 @@ void device_polling(  )
                 {
                     time_t timeFormat = time(0);
                     char* currentTime = ctime(&timeFormat);
-                    char samplesBuffer[SAMPLE_RECORD_SIZE];
+                    currentTime[strlen(currentTime) - 1] = '\0'; // removing line feed
 
-                    std::cout   << "\n" << samplesBuffer << "\t"  << currentTime << "\ttemp = " << std::fixed << std::setprecision(3)
-                                << sample.temp_mC / 1000.0 << " C"
-                                << "\talert = " << ((sample.flags & 0x02) ? "1" : "0")
-                                << std::endl;
+                    std::cout  << currentTime
+                               << "\ttemp = " << std::fixed << std::setprecision(2) << sample.temp_mC/1000.0 << " C"
+                               << " \talert = " << ((sample.flags & 0x02) ? "1" : "0") << std::endl;
                 }
 
                 else
